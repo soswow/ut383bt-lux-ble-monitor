@@ -1,0 +1,9 @@
+.venv/
+.DS_Store
+__pycache__/
+*.egg-info/
+build/
+dist/
+*.csv
+recordings/*
+!recordings/README.md

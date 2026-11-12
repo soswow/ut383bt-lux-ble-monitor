@@ -1,0 +1,269 @@
+<!-- Copyright (C) 2026 Aleksandr Motsjonov. SPDX-License-Identifier: GPL-3.0-or-later -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Light meter</title>
+<style>
+:root{color-scheme:dark;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101719;color:#edf6f3}*{box-sizing:border-box}body{margin:0}main{max-width:1200px;margin:auto;padding:28px}.chart{background:#182326;border:1px solid #2c3b3c;border-radius:16px;padding:24px}.charthead{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;flex-wrap:wrap}.identity{display:flex;align-items:center;gap:22px;flex-wrap:wrap}.title{font-size:14px;font-weight:600;color:#a7bcb5;margin:0 0 6px}.reading{font-size:clamp(36px,5vw,54px);font-weight:650;letter-spacing:-.05em;line-height:1}.reading span{font-size:17px;letter-spacing:0;color:#9bb1aa;font-weight:400}.meta{display:grid;gap:5px;color:#91a8a0;font-size:12px}.status{display:flex;align-items:center;gap:7px;color:#c0d0cc;font-size:13px}.dot{width:8px;height:8px;border-radius:50%;background:#e6ac65}.connected .dot{background:#74d5ad}.disconnected .dot,.offline .dot{background:#ee8181}.controls{display:flex;align-items:center;justify-content:flex-end;gap:10px 18px;flex-wrap:wrap}.interval-form{display:flex;align-items:center;gap:7px}.interval-form label{display:flex;align-items:center;gap:7px;color:#a7bcb5;font-size:13px}.interval-form select{background:#101719;border:1px solid #405453;border-radius:7px;color:#edf6f3;padding:7px;font:inherit}.interval-form button{background:#314b43;border:1px solid #52796a;border-radius:7px;color:#b2f0d3;padding:7px 10px;font:inherit;font-size:13px;cursor:pointer}.record{background:#314b43;border:1px solid #52796a;border-radius:7px;color:#b2f0d3;padding:7px 10px;font:inherit;font-size:13px;cursor:pointer}.record.active{background:#553437;border-color:#986062;color:#ffcbcb}.record:disabled{opacity:.5;cursor:not-allowed}.record-message{color:#a7bcb5;font-size:12px;overflow-wrap:anywhere;margin:0}.record-message:empty{display:none}.reset{background:transparent;border:1px solid #405453;border-radius:7px;color:#c0d0cc;padding:7px 10px;font:inherit;font-size:13px;cursor:pointer}.reset:hover{background:#263739}.reset:focus-visible{outline:2px solid #9ae8c6;outline-offset:2px}.interval-message{color:#a7bcb5;font-size:12px;margin:0}.interval-message:empty{display:none}.window-controls{display:flex;gap:4px;flex-wrap:wrap}.window-controls button{border:1px solid transparent;border-radius:7px;background:transparent;color:#a7bcb5;padding:7px 10px;font:inherit;font-size:13px;cursor:pointer}.window-controls button:hover{background:#263739}.window-controls button[aria-pressed="true"]{background:#314b43;color:#b2f0d3;border-color:#52796a}.window-controls button:focus-visible,.interval-form button:focus-visible{outline:2px solid #9ae8c6;outline-offset:2px}.plot{height:clamp(300px,60vh,650px);position:relative;margin-top:24px}canvas{width:100%;height:100%;display:block}.empty[hidden]{display:none}.empty{position:absolute;inset:0;display:grid;place-items:center;color:#91a8a0;font-size:14px;pointer-events:none}.note{color:#91a8a0;font-size:12px;line-height:1.5;margin:12px 0 0}@media(max-width:600px){main{padding:12px}.chart{padding:18px}.charthead{gap:18px}.controls{justify-content:flex-start}.plot{height:50vh;min-height:260px}}
+</style>
+</head>
+<body><main>
+<section class="chart" aria-label="Light meter chart">
+  <header class="charthead">
+    <div class="identity">
+      <div><h1 class="title">UNI-T UT383BT · Illuminance</h1><div class="reading" id="current">— <span>lux</span></div></div>
+      <div class="meta"><div id="status" class="status"><span class="dot"></span><span id="status-text">Connecting…</span></div><div id="updated">Waiting for a reading</div><div><span id="count">0</span> readings in memory</div></div>
+    </div>
+    <div class="controls">
+      <form class="interval-form" id="interval-form"><label>Interval <select id="interval"><option value="0.5">0.5s</option><option value="1">1s</option><option value="2">2s</option></select></label></form>
+      <button type="button" class="record" id="record" disabled>Start recording</button>
+      <p class="record-message" id="record-message" aria-live="polite"></p>
+      <button type="button" class="reset" id="reset" title="Clear all stored readings">Reset</button>
+      <p class="interval-message" id="interval-message" aria-live="polite"></p>
+      <div class="window-controls" role="group" aria-label="Chart time window"><button type="button" data-minutes="1" aria-pressed="false">1m</button><button type="button" data-minutes="5" aria-pressed="true">5m</button><button type="button" data-minutes="10" aria-pressed="false">10m</button><button type="button" data-minutes="30" aria-pressed="false">30m</button><button type="button" data-minutes="60" aria-pressed="false">60m</button></div>
+    </div>
+  </header>
+  <div class="plot"><canvas id="plot" aria-label="Illuminance over time chart" role="img"></canvas><div class="empty" id="empty">Waiting for measurements…</div></div>
+  <p class="note">Set the meter to LUX. Illuminance is not red-light irradiance.</p>
+</section>
+</main>
+<script>
+const element = (id) => {
+  return document.getElementById(id);
+};
+
+const historyMilliseconds = 60 * 60 * 1000;
+const chartMargin = { left: 58, right: 12, top: 12, bottom: 32 };
+
+let points = [];
+let windowMinutes = 5;
+let socket;
+let currentInterval = 1;
+let recording = false;
+
+// The window ends at the newest reading, so a disconnect does not scroll the trace away.
+const draw = () => {
+  const canvas = element("plot");
+  const bounds = canvas.getBoundingClientRect();
+  const pixelRatio = devicePixelRatio || 1;
+  canvas.width = Math.round(bounds.width * pixelRatio);
+  canvas.height = Math.round(bounds.height * pixelRatio);
+
+  const context = canvas.getContext("2d");
+  context.scale(pixelRatio, pixelRatio);
+
+  const width = bounds.width;
+  const height = bounds.height;
+  const plotWidth = width - chartMargin.left - chartMargin.right;
+  const plotHeight = height - chartMargin.top - chartMargin.bottom;
+  const windowEnd = points.length ? Date.parse(points[points.length - 1].time) : Date.now();
+  const windowStart = windowEnd - windowMinutes * 60 * 1000;
+  const visible = points.filter((point) => {
+    const time = Date.parse(point.time);
+    return time >= windowStart && time <= windowEnd;
+  });
+
+  const empty = element("empty");
+  empty.hidden = visible.length > 0;
+  empty.textContent = points.length ? "No readings in this time window" : "Waiting for measurements…";
+  if (!visible.length || plotWidth <= 0) {
+    return;
+  }
+
+  const luxValues = visible.map((point) => point.lux);
+  const lowestLux = Math.min(...luxValues);
+  const highestLux = Math.max(...luxValues);
+  // A flat trace still needs vertical room, and lux does not go below zero.
+  const padding = Math.max((highestLux - lowestLux) * 0.15, highestLux * 0.05, 1);
+  const minimumLux = Math.max(0, lowestLux - padding);
+  const maximumLux = highestLux + padding;
+  const times = visible.map((point) => Date.parse(point.time));
+  const xForTime = (time) => {
+    return chartMargin.left + (time - windowStart) / (windowEnd - windowStart) * plotWidth;
+  };
+  const yForLux = (lux) => {
+    return chartMargin.top + (maximumLux - lux) / (maximumLux - minimumLux) * plotHeight;
+  };
+
+  context.font = "12px system-ui";
+  context.fillStyle = "#91a8a0";
+  context.strokeStyle = "#344649";
+  context.lineWidth = 1;
+  for (let index = 0; index <= 4; index += 1) {
+    const y = chartMargin.top + plotHeight * index / 4;
+    const value = maximumLux - (maximumLux - minimumLux) * index / 4;
+    context.beginPath();
+    context.moveTo(chartMargin.left, y);
+    context.lineTo(width - chartMargin.right, y);
+    context.stroke();
+    context.textAlign = "right";
+    context.fillText(Math.round(value).toLocaleString(), chartMargin.left - 10, y + 4);
+  }
+  context.textAlign = "left";
+  context.fillText(new Date(windowStart).toLocaleTimeString(), chartMargin.left, height - 6);
+  context.textAlign = "right";
+  context.fillText(new Date(windowEnd).toLocaleTimeString(), width - chartMargin.right, height - 6);
+
+  context.strokeStyle = "#75d6ae";
+  context.lineWidth = 2.5;
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  context.beginPath();
+  visible.forEach((point, index) => {
+    const x = xForTime(times[index]);
+    const y = yForLux(point.lux);
+    // Each segment is one connection. A reconnect must not draw a line across the gap.
+    if (index === 0 || point.segment !== visible[index - 1].segment) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  });
+  context.stroke();
+
+  const lastPoint = visible[visible.length - 1];
+  context.fillStyle = "#9ae8c6";
+  context.beginPath();
+  context.arc(xForTime(times[times.length - 1]), yForLux(lastPoint.lux), 3.5, 0, 2 * Math.PI);
+  context.fill();
+};
+
+// The server can confirm an interval that is not one of the built-in choices.
+const updateInterval = (value) => {
+  currentInterval = value;
+  const select = element("interval");
+  const alreadyListed = Array.from(select.options).some((option) => {
+    return Number(option.value) === value;
+  });
+  if (!alreadyListed) {
+    select.add(new Option(value + "s", value));
+  }
+  select.value = String(value);
+};
+
+const updateReadings = () => {
+  const oldestKept = Date.now() - historyMilliseconds;
+  points = points.filter((point) => {
+    return Date.parse(point.time) >= oldestKept;
+  });
+  element("count").textContent = points.length.toLocaleString();
+  if (points.length) {
+    const lastPoint = points[points.length - 1];
+    element("current").innerHTML = Number(lastPoint.lux).toLocaleString() + " <span>lux</span>";
+    element("updated").textContent = "Last reading " + new Date(lastPoint.time).toLocaleTimeString();
+  } else {
+    element("current").innerHTML = "— <span>lux</span>";
+    element("updated").textContent = "Waiting for a reading";
+  }
+  draw();
+};
+
+// The button already shows an active recording, and a successful save needs no extra line.
+const updateRecording = (info) => {
+  recording = info.active;
+  const button = element("record");
+  button.textContent = recording ? "Stop recording" : "Start recording";
+  button.classList.toggle("active", recording);
+  button.disabled = false;
+  const saved = (info.message || "").startsWith("Saved ");
+  element("record-message").textContent = info.active || saved ? "" : (info.message || "");
+};
+
+const showStatus = (status, detail) => {
+  element("status").className = "status " + status;
+  element("status-text").textContent = detail;
+};
+
+const connect = () => {
+  const protocol = location.protocol === "https:" ? "wss://" : "ws://";
+  socket = new WebSocket(protocol + location.host + "/ws");
+  socket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === "snapshot") {
+      points = message.readings;
+      updateInterval(message.interval);
+      updateRecording(message.recording);
+      showStatus(message.status, message.detail);
+      updateReadings();
+    } else if (message.type === "measurement") {
+      points.push(message.reading);
+      updateReadings();
+    } else if (message.type === "recording") {
+      updateRecording(message);
+    } else if (message.type === "reset") {
+      points = [];
+      updateReadings();
+    } else if (message.type === "status") {
+      showStatus(message.status, message.detail);
+    } else if (message.type === "interval") {
+      updateInterval(message.interval);
+      element("interval-message").textContent = "Interval set to " + message.interval + " s.";
+    } else if (message.type === "error") {
+      updateInterval(currentInterval);
+      element("interval-message").textContent = message.detail;
+    }
+  };
+  socket.onclose = () => {
+    element("record").disabled = true;
+    showStatus("offline", "Server unavailable · reconnecting…");
+    setTimeout(connect, 2000);
+  };
+  socket.onerror = () => {
+    socket.close();
+  };
+};
+
+const socketOpen = () => {
+  return socket.readyState === WebSocket.OPEN;
+};
+
+element("record").addEventListener("click", () => {
+  if (!socketOpen()) {
+    return;
+  }
+  element("record").disabled = true;
+  const type = recording ? "stop_recording" : "start_recording";
+  socket.send(JSON.stringify({ type }));
+});
+
+element("reset").addEventListener("click", () => {
+  if (socketOpen()) {
+    socket.send(JSON.stringify({ type: "reset" }));
+  } else {
+    element("interval-message").textContent = "Server unavailable";
+  }
+});
+
+element("interval-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+});
+
+element("interval").addEventListener("change", () => {
+  if (!socketOpen()) {
+    updateInterval(currentInterval);
+    element("interval-message").textContent = "Server unavailable";
+    return;
+  }
+  socket.send(JSON.stringify({
+    type: "set_interval",
+    interval: Number(element("interval").value),
+  }));
+});
+
+document.querySelectorAll("[data-minutes]").forEach((button) => {
+  button.addEventListener("click", () => {
+    windowMinutes = Number(button.dataset.minutes);
+    document.querySelectorAll("[data-minutes]").forEach((item) => {
+      item.setAttribute("aria-pressed", String(item === button));
+    });
+    draw();
+  });
+});
+
+window.addEventListener("resize", draw);
+connect();
+</script>
+</body>
+</html>
